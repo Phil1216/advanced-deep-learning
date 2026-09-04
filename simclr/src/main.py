@@ -75,7 +75,14 @@ class SimCLRModel(nn.Module):
         super().__init__()
         self.backbone = backbone
         embedding_dim = self.backbone.config.hidden_size
-        # TODO: Add the projection head
+
+        # TODO: Add the projection head (Done)
+        proj_hidden = embedding_dim + projection_dim // 2
+        self.projection_head = nn.sequential([
+            nn.Linear(embedding_dim, proj_hidden),
+            nn.ReLU(),
+            nn.Linear(proj_hidden, projection_dim)
+        ])
 
     def forward(self, x):
         """
@@ -85,8 +92,8 @@ class SimCLRModel(nn.Module):
         Returns:
             torch.Tensor: Output tensor after projection head of shape [batch_size, projection_dim]
         """
-        # TODO: Implement the forward pass for SimCLR
-        return x
+        # TODO: Implement the forward pass for SimCLR (Done)
+        return self.projection_head(self.backbone(pixel_values=x).last_hidden_state[:, 0, :])
 
 class SupervisedModel(nn.Module):
     def __init__(self, backbone, num_classes):

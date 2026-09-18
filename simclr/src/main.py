@@ -17,6 +17,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.datasets import ImageFolder
 from transformers import AutoModel, AutoConfig
 
+from collections import OrderedDict
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- Data Handling ---
@@ -28,9 +30,30 @@ class SimCLRImageFolder(ImageFolder):
         view2 = self.transform(sample)
         return view1, view2
 
+def get_color_distortion(s=1.0):
+    # s is the strength of color distortion.
+    color_jitter = T.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s)
+    rnd_color_jitter = T.RandomApply([color_jitter], p=0.8)
+    rnd_gray = T.RandomGrayscale(p=0.2)
+    return T.Compose([
+        rnd_color_jitter,
+        rnd_gray
+    ])
+
+def get_gaussian_blur(size):
+    ker_size = size // 10
+    gaussian_blur = T.GaussianBlur(ker_size, sigma=(0.1, 2.0))
+    rnd_blur = T.RandomApply([gaussian_blur], p=0.5)
+    return rnd_blur
+
 def get_simclr_transform(size):
-    # TODO: Implement data augmentation for SimCLR using torchvision transforms
-    pass
+    # TODO: Implement data augmentation for SimCLR using torchvision transforms (Done)
+    return T.Compose([
+        T.RandomResizedCrop(size=(224, 224)),
+        T.RandomHorizontalFlip(p=0.5),
+        get_color_distortion(),
+        get_gaussian_blur(size)
+    ])
 
 def get_supervised_transform(size, is_train=True):
     if is_train:
@@ -78,11 +101,13 @@ class SimCLRModel(nn.Module):
 
         # TODO: Add the projection head (Done)
         proj_hidden = embedding_dim + projection_dim // 2
-        self.projection_head = nn.sequential([
-            nn.Linear(embedding_dim, proj_hidden),
-            nn.ReLU(),
-            nn.Linear(proj_hidden, projection_dim)
-        ])
+        self.projection_head = nn.Sequential(
+            OrderedDict([
+                ("Hidden", nn.Linear(embedding_dim, proj_hidden)),
+                ("ReLU", nn.ReLU()),
+                ("Out", nn.Linear(proj_hidden, projection_dim))
+            ])
+        )
 
     def forward(self, x):
         """
@@ -92,6 +117,7 @@ class SimCLRModel(nn.Module):
         Returns:
             torch.Tensor: Output tensor after projection head of shape [batch_size, projection_dim]
         """
+        
         # TODO: Implement the forward pass for SimCLR (Done)
         return self.projection_head(self.backbone(pixel_values=x).last_hidden_state[:, 0, :])
 
@@ -111,8 +137,74 @@ class NTXentLoss(nn.Module):
         self.device = device
         # TODO: Add any other variables needed
 
+        # torch.set_printoptions(precision=8)
 
-    def forward(self, z_i, z_j):
+    def cosSim(self, z_i: torch.Tensor, z_j: torch.Tensor) -> torch.Tensor:
+        # Both shaped as [batch_size, projection_dim]
+        # Each row is a vector in our latent space
+        # We're doing (u)(v^t) to eliminate projection_dim, giving us the dot product between each
+        # pair of vectors
+
+        cat = torch.cat((z_i, z_j), dim=0) #[2 * batch_size, projection_dim]
+
+        # normalize the rows
+        catNorms = torch.linalg.vector_norm(cat, ord=2, dim=1, keepdim=True) #[2 * batch_size, 1]
+        cat = torch.div(cat, catNorms) #[2 * batch_size, projection_dim]
+
+        # dot product each row with every other row
+        res = torch.matmul(cat, cat.T) #[2 * batch_size, 2 * batch_size]
+
+        # print("cosSim res shape: ")
+        # print(res.shape)
+        # print(res)
+
+        return res #[2 * batch_size, 2 * batch_size]
+
+    def scaledSim(self, simTensor: torch.Tensor) -> torch.Tensor:
+        # simTensor shaped as [2 * batch_size, 2 * batch_size]
+
+        # divide all elements by temperature
+        res = torch.div(simTensor, self.temperature) #[2 * batch_size, 2 * batch_size]
+
+        # exponentiate all elements
+        res = torch.exp(res) #[2 * batch_size, 2 * batch_size]
+
+        # The diagonals are comparing each vector with itself, which is not useful
+        res.fill_diagonal_(0) #[2 * batch_size, 2 * batch_size]
+
+        # print("scaledSim res shape: ")
+        # print(res.shape)
+        # print(res)
+
+        return res #[2 * batch_size, 2 * batch_size]
+
+
+    def pairLoss(self, simTensor: torch.Tensor, rowSums: torch.Tensor, i: int, j: int):
+        # simTensor shaped as [2 * batch_size, 2 * batch_size]
+        # rowSums shaped as [2 * batch_size]
+
+        return -1 * torch.log(simTensor[i, j] / rowSums[i]) # [1]
+
+    def loss1(self, z_i: torch.Tensor, z_j: torch.Tensor):
+        simTensor: torch.Tensor = self.scaledSim(self.cosSim(z_i, z_j)) # [2 * batch_size, 2 * batch_size]
+        rowSums = torch.sum(simTensor, dim=1) # [2 * batch_size]
+
+        # print("simTensor and rowSums")
+        # print(simTensor)
+        # print(rowSums)
+
+        sum = torch.tensor([0.0])
+        for i in range(self.batch_size):
+            # Because of concatenation, the corresponding positive pair is located at (i + N)
+            # In the paper they interleave positive pairs every other
+            sum += self.pairLoss(simTensor, rowSums, i, i + self.batch_size)
+            sum += self.pairLoss(simTensor, rowSums, i + self.batch_size, i)
+
+        # can instead sum upper triangular and lower triangular (transposed)
+
+        return torch.div(sum, 2 * self.batch_size)
+        
+    def forward(self, z_i: torch.Tensor, z_j: torch.Tensor):
         """
         Args:
             z_i (torch.Tensor): First set of representations
@@ -120,8 +212,10 @@ class NTXentLoss(nn.Module):
         Returns:
             torch.Tensor: Computed loss
         """
-        # TODO: Implement the forward pass of NTXentLoss
-        pass
+        # Both shaped as [batch_size, projection_dim]
+
+        # TODO: Implement the forward pass of NTXentLoss (Done)
+        return self.loss1(z_i, z_j)
 
 # --- Training & Evaluation Functions ---
 def get_model_backbone(args, pretrained=False):

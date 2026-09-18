@@ -41,7 +41,8 @@ def get_color_distortion(s=1.0):
     ])
 
 def get_gaussian_blur(size):
-    ker_size = size // 10
+    ker_size = size / 10
+    ker_size = int(2 * round((ker_size - 1) / 2) + 1)
     gaussian_blur = T.GaussianBlur(ker_size, sigma=(0.1, 2.0))
     rnd_blur = T.RandomApply([gaussian_blur], p=0.5)
     return rnd_blur
@@ -52,7 +53,8 @@ def get_simclr_transform(size):
         T.RandomResizedCrop(size=(224, 224)),
         T.RandomHorizontalFlip(p=0.5),
         get_color_distortion(),
-        get_gaussian_blur(size)
+        get_gaussian_blur(size),
+        T.ToTensor()
     ])
 
 def get_supervised_transform(size, is_train=True):
@@ -170,7 +172,9 @@ class NTXentLoss(nn.Module):
         res = torch.exp(res) #[2 * batch_size, 2 * batch_size]
 
         # The diagonals are comparing each vector with itself, which is not useful
-        res.fill_diagonal_(0) #[2 * batch_size, 2 * batch_size]
+        # Zero the diagonals by scattering into the main diagonal
+        zeros = torch.zeros(res.shape[-1], device=self.device, dtype=res.dtype)
+        res = torch.diagonal_scatter(res, zeros, offset=0) #[2 * batch_size, 2 * batch_size]
 
         # print("scaledSim res shape: ")
         # print(res.shape)
@@ -193,12 +197,12 @@ class NTXentLoss(nn.Module):
         # print(simTensor)
         # print(rowSums)
 
-        sum = torch.tensor([0.0])
+        sum = torch.tensor([0.0], device=self.device)
         for i in range(self.batch_size):
             # Because of concatenation, the corresponding positive pair is located at (i + N)
             # In the paper they interleave positive pairs every other
-            sum += self.pairLoss(simTensor, rowSums, i, i + self.batch_size)
-            sum += self.pairLoss(simTensor, rowSums, i + self.batch_size, i)
+            sum = sum + self.pairLoss(simTensor, rowSums, i, i + self.batch_size)
+            sum = sum + self.pairLoss(simTensor, rowSums, i + self.batch_size, i)
 
         # can instead sum upper triangular and lower triangular (transposed)
 
@@ -368,6 +372,8 @@ def _build_run_dir(args):
 
 
 def main(args):
+    # torch.autograd.set_detect_anomaly(True, check_nan=False)
+
     torch.manual_seed(42)
     np.random.seed(42)
     args.device = "cuda" if torch.cuda.is_available() else "cpu"

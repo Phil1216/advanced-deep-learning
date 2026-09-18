@@ -139,7 +139,7 @@ class NTXentLoss(nn.Module):
         self.device = device
         # TODO: Add any other variables needed
 
-        # torch.set_printoptions(precision=8)
+        torch.set_printoptions(precision=8)
 
     def cosSim(self, z_i: torch.Tensor, z_j: torch.Tensor) -> torch.Tensor:
         # Both shaped as [batch_size, projection_dim]
@@ -171,17 +171,20 @@ class NTXentLoss(nn.Module):
         # exponentiate all elements
         res = torch.exp(res) #[2 * batch_size, 2 * batch_size]
 
+        # print("scaledSim res before: ")
+        # print(res.shape)
+        # print(res)
+
         # The diagonals are comparing each vector with itself, which is not useful
         # Zero the diagonals by scattering into the main diagonal
         zeros = torch.zeros(res.shape[-1], device=self.device, dtype=res.dtype)
         res = torch.diagonal_scatter(res, zeros, offset=0) #[2 * batch_size, 2 * batch_size]
 
-        # print("scaledSim res shape: ")
+        # print("scaledSim res: ")
         # print(res.shape)
         # print(res)
 
         return res #[2 * batch_size, 2 * batch_size]
-
 
     def pairLoss(self, simTensor: torch.Tensor, rowSums: torch.Tensor, i: int, j: int):
         # simTensor shaped as [2 * batch_size, 2 * batch_size]
@@ -207,7 +210,52 @@ class NTXentLoss(nn.Module):
         # can instead sum upper triangular and lower triangular (transposed)
 
         return torch.div(sum, 2 * self.batch_size)
+
+    def interleave(self, z_i: torch.Tensor, z_j: torch.Tensor):
+        # Both shaped as [batch_size, projection_dim]
+        # Each row is a vector in our latent space
         
+        proj_dim = z_i.shape[1]
+        res = torch.empty((0, proj_dim), device=self.device)
+        # print(res.shape)
+        for i in range(self.batch_size):
+            res = torch.cat([res, z_i[i, :].unsqueeze(0)], dim=0)
+            res = torch.cat([res, z_j[i, :].unsqueeze(0)], dim=0)
+
+        return res
+
+    def vecCosSim(self, z_i: torch.Tensor, z_j: torch.Tensor):
+        res = torch.dot(z_i, z_j)
+        res = res / (torch.linalg.vector_norm(z_i, ord=2) * torch.linalg.vector_norm(z_j, ord=2))
+        return res
+
+    def loopPairLoss(self, interleaved: torch.Tensor, i: int, j: int):
+        numer = self.vecCosSim(interleaved[i, :], interleaved[j, :])
+        numer = numer / self.temperature
+        numer = torch.exp(numer)
+
+        sum = torch.tensor([0.0], device=self.device)
+        for k in range(interleaved.shape[0]):
+            if k != i:
+                part = self.vecCosSim(interleaved[i, :], interleaved[k, :])
+                part = part / self.temperature
+                part = torch.exp(part)
+                sum = sum + part
+
+        return -1 * torch.log(numer / sum)
+
+    def loss2(self, z_i: torch.Tensor, z_j: torch.Tensor):
+        interleave = self.interleave(z_i, z_j)
+
+        loss = torch.tensor([0.0], device=self.device)
+        for k in range(self.batch_size):
+            loss = loss + self.loopPairLoss(interleave, 2 * k, (2 * k) + 1)
+            loss = loss + self.loopPairLoss(interleave, 2 * k, (2 * k) + 1)
+
+        loss = loss / (2 * self.batch_size)
+        return loss
+
+    
     def forward(self, z_i: torch.Tensor, z_j: torch.Tensor):
         """
         Args:
@@ -216,10 +264,17 @@ class NTXentLoss(nn.Module):
         Returns:
             torch.Tensor: Computed loss
         """
+
         # Both shaped as [batch_size, projection_dim]
 
+        loss2 = self.loss2(z_i, z_j)
+
         # TODO: Implement the forward pass of NTXentLoss (Done)
-        return self.loss1(z_i, z_j)
+        loss1 = self.loss1(z_i, z_j)
+
+        print(F"loss1: {loss1}, loss2: {loss2}")
+
+        return loss1
 
 # --- Training & Evaluation Functions ---
 def get_model_backbone(args, pretrained=False):

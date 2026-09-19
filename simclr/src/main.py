@@ -156,10 +156,6 @@ class NTXentLoss(nn.Module):
         # dot product each row with every other row
         res = torch.matmul(cat, cat.T) #[2 * batch_size, 2 * batch_size]
 
-        # print("cosSim res shape: ")
-        # print(res.shape)
-        # print(res)
-
         return res #[2 * batch_size, 2 * batch_size]
 
     def scaledSim(self, simTensor: torch.Tensor) -> torch.Tensor:
@@ -171,18 +167,10 @@ class NTXentLoss(nn.Module):
         # exponentiate all elements
         res = torch.exp(res) #[2 * batch_size, 2 * batch_size]
 
-        # print("scaledSim res before: ")
-        # print(res.shape)
-        # print(res)
-
         # The diagonals are comparing each vector with itself, which is not useful
         # Zero the diagonals by scattering into the main diagonal
         zeros = torch.zeros(res.shape[-1], device=self.device, dtype=res.dtype)
         res = torch.diagonal_scatter(res, zeros, offset=0) #[2 * batch_size, 2 * batch_size]
-
-        # print("scaledSim res: ")
-        # print(res.shape)
-        # print(res)
 
         return res #[2 * batch_size, 2 * batch_size]
 
@@ -196,18 +184,12 @@ class NTXentLoss(nn.Module):
         simTensor: torch.Tensor = self.scaledSim(self.cosSim(z_i, z_j)) # [2 * batch_size, 2 * batch_size]
         rowSums = torch.sum(simTensor, dim=1) # [2 * batch_size]
 
-        # print("simTensor and rowSums")
-        # print(simTensor)
-        # print(rowSums)
-
         sum = torch.tensor([0.0], device=self.device)
         for i in range(self.batch_size):
             # Because of concatenation, the corresponding positive pair is located at (i + N)
             # In the paper they interleave positive pairs every other
             sum = sum + self.pairLoss(simTensor, rowSums, i, i + self.batch_size)
             sum = sum + self.pairLoss(simTensor, rowSums, i + self.batch_size, i)
-
-        # can instead sum upper triangular and lower triangular (transposed)
 
         return torch.div(sum, 2 * self.batch_size)
 
@@ -217,7 +199,6 @@ class NTXentLoss(nn.Module):
         
         proj_dim = z_i.shape[1]
         res = torch.empty((0, proj_dim), device=self.device)
-        # print(res.shape)
         for i in range(self.batch_size):
             res = torch.cat([res, z_i[i, :].unsqueeze(0)], dim=0)
             res = torch.cat([res, z_j[i, :].unsqueeze(0)], dim=0)
@@ -229,7 +210,7 @@ class NTXentLoss(nn.Module):
         res = res / (torch.linalg.vector_norm(z_i, ord=2) * torch.linalg.vector_norm(z_j, ord=2))
         return res
 
-    def loopPairLoss(self, interleaved: torch.Tensor, i: int, j: int):
+    def loopPairLoss2(self, interleaved: torch.Tensor, i: int, j: int):
         numer = self.vecCosSim(interleaved[i, :], interleaved[j, :])
         numer = numer / self.temperature
         numer = torch.exp(numer)
@@ -249,12 +230,39 @@ class NTXentLoss(nn.Module):
 
         loss = torch.tensor([0.0], device=self.device)
         for k in range(self.batch_size):
-            loss = loss + self.loopPairLoss(interleave, 2 * k, (2 * k) + 1)
-            loss = loss + self.loopPairLoss(interleave, 2 * k, (2 * k) + 1)
+            loss = loss + self.loopPairLoss2(interleave, 2 * k, (2 * k) + 1)
+            loss = loss + self.loopPairLoss2(interleave, (2 * k) + 1, 2 * k)
 
         loss = loss / (2 * self.batch_size)
         return loss
 
+    def loopSimPrecalc3(self, interleaved: torch.Tensor) -> torch.Tensor:
+        res = torch.zeros((2 * self.batch_size, 2 * self.batch_size), device=self.device)
+        for i in range(0, 2 * self.batch_size):
+            for j in range(0, 2 * self.batch_size):
+                res[i, j] = self.vecCosSim(interleaved[i, :], interleaved[j, :])
+
+        res = torch.div(res, self.temperature)
+        res = torch.exp(res)
+
+        # The diagonals are comparing each vector with itself, which is not useful
+        # Zero the diagonals by scattering into the main diagonal
+        zeros = torch.zeros(res.shape[-1], device=self.device, dtype=res.dtype)
+        res = torch.diagonal_scatter(res, zeros, offset=0)
+
+        return res
+
+    def loss3(self, z_i: torch.Tensor, z_j: torch.Tensor):
+        interleave = self.interleave(z_i, z_j)
+        simTensor = self.loopSimPrecalc3(interleave)
+        rowSums = torch.sum(simTensor, dim=1)
+
+        sum = torch.tensor([0.0], device=self.device)
+        for k in range(self.batch_size):
+            sum = sum + self.pairLoss(simTensor, rowSums, 2 * k, (2 * k) + 1)
+            sum = sum + self.pairLoss(simTensor, rowSums, (2 * k) + 1, 2 * k)
+
+        return torch.div(sum, 2 * self.batch_size)
     
     def forward(self, z_i: torch.Tensor, z_j: torch.Tensor):
         """
@@ -268,11 +276,12 @@ class NTXentLoss(nn.Module):
         # Both shaped as [batch_size, projection_dim]
 
         loss2 = self.loss2(z_i, z_j)
+        loss3 = self.loss3(z_i, z_j)
 
         # TODO: Implement the forward pass of NTXentLoss (Done)
         loss1 = self.loss1(z_i, z_j)
 
-        print(F"loss1: {loss1}, loss2: {loss2}")
+        print(F"loss1: {loss1}, loss2: {loss2}, loss3: {loss3}")
 
         return loss1
 

@@ -31,6 +31,7 @@ class SimCLRImageFolder(ImageFolder):
         return view1, view2
 
 def get_color_distortion(s=1.0):
+    # Note: function taken directly from the SimCLR paper
     # s is the strength of color distortion.
     color_jitter = T.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s)
     rnd_color_jitter = T.RandomApply([color_jitter], p=0.8)
@@ -54,7 +55,8 @@ def get_simclr_transform(size):
         T.RandomHorizontalFlip(p=0.5),
         get_color_distortion(),
         get_gaussian_blur(size),
-        T.ToTensor()
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
 def get_supervised_transform(size, is_train=True):
@@ -102,7 +104,7 @@ class SimCLRModel(nn.Module):
         embedding_dim = self.backbone.config.hidden_size
 
         # TODO: Add the projection head (Done)
-        proj_hidden = embedding_dim + projection_dim // 2
+        proj_hidden = (embedding_dim + projection_dim) // 2
         self.projection_head = nn.Sequential(
             OrderedDict([
                 ("Hidden", nn.Linear(embedding_dim, proj_hidden)),
@@ -275,13 +277,13 @@ class NTXentLoss(nn.Module):
 
         # Both shaped as [batch_size, projection_dim]
 
-        loss2 = self.loss2(z_i, z_j)
-        loss3 = self.loss3(z_i, z_j)
+        # loss2 = self.loss2(z_i, z_j)
+        # loss3 = self.loss3(z_i, z_j)
 
         # TODO: Implement the forward pass of NTXentLoss (Done)
         loss1 = self.loss1(z_i, z_j)
 
-        print(F"loss1: {loss1}, loss2: {loss2}, loss3: {loss3}")
+        # print(F"loss1: {loss1}, loss2: {loss2}, loss3: {loss3}")
 
         return loss1
 

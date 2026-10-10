@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from tqdm import tqdm
 import wandb
+import sys
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 
 model_path = "Qwen/Qwen2.5-3B"
@@ -105,19 +106,41 @@ def GRPO_step(batch, pad_token_id):
     gen_logps = batch.get('gen_logps', None)
     assert gen_logps is not None
     
-    # 1. Compute per-token log probabilities of the model
-    # 2. Slice to keep only completion tokens (after prompt)
-    # 3. Move reference log probabilities to the same device as per_token_logps
-    # 4. Compute per-token KL divergence approximation for regularization
-    # 5. Create mask for completion tokens (not padding)
-    # 6. Compute importance sampling ratio
-    # 7. Clip ratio for PPO-style loss
-    # 8. Compute per-token GRPO loss
-    # 9. Average loss over completion tokens and batch
-    # 10. Return final loss 
-
     # TODO: Implement GRPO loss computation
-    pass
+
+    # 1. Compute per-token log probabilities of the model
+    per_token_logps = get_per_token_logps(logits, input_ids)
+
+    # 2. Slice to keep only completion tokens (after prompt)
+    per_token_logps = per_token_logps[:, prompt_length - 1:]
+
+    # 3. Move reference log probabilities to the same device as per_token_logps
+    refs_per_token_logps = refs_per_token_logps.to(engine.device)
+    gen_logps = gen_logps.to(engine.device)
+
+    # 4. Compute per-token KL divergence approximation for regularization
+    kl_ratio = torch.exp(refs_per_token_logps - per_token_logps)
+    kl_divergence = kl_ratio - (refs_per_token_logps - per_token_logps) - 1
+
+    # 5. Create mask for completion tokens (not padding)
+    padMask = input_ids[:, prompt_length - 1:] != pad_token_id
+    per_token_logps = torch.mul(per_token_logps, padMask)
+
+    # 6. Compute importance sampling ratio
+    imp_ratio = torch.exp(per_token_logps - gen_logps)
+
+    # 7. Clip ratio for PPO-style loss
+    clip_ratio = torch.clamp(imp_ratio, 1 - clip_param, 1 + clip_param)
+
+    # 8. Compute per-token GRPO loss
+    clip_min = torch.minimum(torch.mul(imp_ratio, advantages), torch.mul(clip_ratio, advantages))
+    token_loss = clip_min - torch.mul(kl_divergence, beta)
+
+    # 9. Average loss over completion tokens and batch
+    avg_loss = torch.mean(token_loss)
+
+    # 10. Return final loss 
+    return -avg_loss
 
 
 def gen_worker(Q, physics_device):
@@ -166,8 +189,24 @@ def gen_worker(Q, physics_device):
             - Uses math_verify.parse and verify to compare the extracted answer to the ground truth
             - Returns -1 if no number is found in the answer
         """
-        # TODO: Implement reward_correct function
-        pass
+        # TODO: Implement reward_correct function Done
+
+        answerPattern = r"^(?!.*<answer>.*?</answer>.*<answer>.*?</answer>).*<answer>(.+?)</answer>.*$"
+        answerMatch = re.search(answerPattern, answer)
+        if not answerMatch:
+            return -1.0
+
+        strAnswer = answerMatch.group(1)
+
+        numericalPattern = r'\d+/\d+|\d+\.\d+|\d+'
+        numericalMatches = re.findall(numericalPattern, strAnswer)
+
+        if not numericalMatches:
+            return -1.0
+
+        expAnswer = parse(strAnswer)
+        expTruth = parse(item["A"])
+        return 1.0 if verify(expAnswer, expTruth) else -1.0
 
     def reward_format(item, answer):
         """Check if the model's answer follows the required format with <think> and <answer> tags.
@@ -182,8 +221,15 @@ def gen_worker(Q, physics_device):
             - Ensures there is exactly one pair of each tag
             - Returns -1 if the format is incorrect
         """
-        # TODO: Implement reward_format function
-        pass
+        # TODO: Implement reward_format function Done
+
+        thinkPattern = r"^(?!.*<think>.*?</think>.*<think>.*?</think>).*<think>.+?</think>.*$"
+        answerPattern = r"^(?!.*<answer>.*?</answer>.*<answer>.*?</answer>).*<answer>(.+?)</answer>.*$"
+
+        thinkMatch = re.search(thinkPattern, answer)
+        answerMatch = re.search(answerPattern, answer)
+
+        return 1.25 if (thinkMatch and answerMatch) else -1.0
 
     def gen_samples(inputs):
         prompts = [x["Q"] for x in inputs]

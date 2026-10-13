@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from src.components import Encoder, Decoder
+import math
 
 class VAE(nn.Module):
     """
@@ -64,8 +65,30 @@ class VAE(nn.Module):
                 mu (Tensor): Mean of the latent distribution, shape (B, latent_dim).
                 logvar (Tensor): Log-variance of the latent distribution, shape (B, latent_dim).
             """
-            # TODO: Implement steps 1-5 as described in the instructions.
-            pass
+            # TODO: Implement steps 1-5 as described in the instructions. (Done)
+
+            # 1. Encode x to get feature map
+            encoded = torch.flatten(self.enc(x), start_dim=1)
+
+            # 2. Extract mu and logvar from encoded features
+            mu = self.linear_mu(encoded)
+            logvar = self.linear_logvar(encoded)
+
+            # 3. Sample latent vector using mu and logvar
+            epsilon = torch.normal(torch.zeros(mu.shape), torch.ones(logvar.shape)).to(x.device)
+            sampled = mu + torch.mul(epsilon, logvar.exp())
+
+            # 4. Map sampled latent vector back to feature space
+            decodeInput = self.from_latent(sampled)
+            channels = self.dim
+            flatShape = decodeInput.shape[1]
+            image_dimensions = int(math.sqrt(flatShape / channels))
+            decodeInput = decodeInput.reshape(decodeInput.shape[0], channels, image_dimensions, image_dimensions)
+
+            # 5. Decode
+            reconstructed_x = self.dec(decodeInput) # .reshape(x.shape)
+
+            return reconstructed_x, mu, logvar
 
         # Step 6: Compute losses
         x, mu, logvar = inner_forward(x)

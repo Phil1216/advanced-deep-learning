@@ -142,6 +142,8 @@ def train_rectified_flow(
     device,
     eps=1e-15,
 ):
+    loss_fn = nn.MSELoss()
+    
     for epoch in tqdm(
         range(NB_EPOCHS),
         desc=f"Training Reflow Step",
@@ -154,10 +156,14 @@ def train_rectified_flow(
             # z0 shape: [batch_size, features]
             # z1 shape: [batch_size, features]
             batch_size = z1.shape[0]
-            # TODO: Part 2
+            # TODO: Part 2 (Done)
             ########################
-            loss = None
-            pass
+            t = torch.rand(z0.size(0), 1).to(device)  # random times for traning
+            interpolated_samples = z0 * (1 - t) + z1 * t
+            line_directions = z1 - z0
+
+            drift = rectified_flow(interpolated_samples, t)
+            loss = loss_fn(drift, line_directions)
             ##########################
 
             optimizer.zero_grad()
@@ -166,6 +172,21 @@ def train_rectified_flow(
 
 
 # Part 3
+def fwd_euler_step(model, current_points, current_t, dt):
+    velocity = model(current_points, current_t)
+    return current_points + velocity * dt 
+
+def rk4_step(f, # function that takes (y,t) and returns dy/dt, i.e. velocity
+             y, # current location
+             t, # current t value
+             dt, # requested time step size 
+             ):
+    k1 =  f(y, t)
+    k2 =  f(y + dt*k1/2, t + dt/2) 
+    k3 =  f(y + dt*k2/2, t + dt/2) 
+    k4 =  f(y + dt*k3, t + dt) 
+    return y + (dt/6)*(k1 + 2*k2 + 2*k3 + k4)
+
 def sample(rectified_flow, T, pi_0_path):
     """
     Args:
@@ -182,9 +203,18 @@ def sample(rectified_flow, T, pi_0_path):
     # pi_0_path shape: [batch_size, features]
     batch_size = pi_0_path.size(0)
     samples = [pi_0_path.clone().unsqueeze(0)]
-    # TODO: Part 3
+    # TODO: Part 3 (Done)
     #####################
-    pass
+    # step_fn = fwd_euler_step
+    step_fn = rk4_step
+    times = torch.linspace(0,1,T).to(pi_0_path.device)
+    for i in range(len(times) - 1):
+        dt = times[i+1]-times[i]
+        time_tensor = torch.full((batch_size, 1), times[i]).to(pi_0_path.device)
+        new_samples = step_fn(rectified_flow, samples[-1].squeeze(0), time_tensor, dt)
+        samples.append(new_samples.unsqueeze(0))
+
+    return torch.cat(samples, dim=0)
     ####################
 
 
@@ -197,14 +227,25 @@ def train_rectified_flow_mnist(
     device,
 ):
     """Training loop for MNIST images."""
+    loss_fn = nn.MSELoss()
+
     for epoch in tqdm(range(NB_EPOCHS), desc="Training MNIST Rectified Flow"):
         total_loss = 0
         num_batches = 0
         for batch_idx, (z1, _) in enumerate(train_dataloader):
             # TODO: Part 4
             ##############
-            loss = None
-            pass
+            z1 = z1.to(device)
+            batch_size = z1.shape[0]
+
+            z0 = torch.randn(z1.shape, device=device)
+            
+            t = torch.rand(batch_size, 1).reshape((batch_size, 1, 1, 1)).to(device)  # random times for traning
+            interpolated_samples = z0 * (1 - t) + z1 * t
+            line_directions = z1 - z0
+
+            drift = rectified_flow(interpolated_samples, t.reshape((batch_size, 1)))
+            loss = loss_fn(drift, line_directions)
             ##############
 
             optimizer.zero_grad()
